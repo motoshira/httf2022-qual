@@ -203,7 +203,7 @@
   (factors nil :type (simple-array fixnum (*))))
 
 (defgeneric find-worker-by-id (state worker-id))
-(defgeneric update-worker-factors (state worker-id factors)
+(defgeneric update-worker-factors-by-id (state worker-id factors)
   (:documentation "factorsは(simple-array fixnum (*))"))
 
 (defstruct task
@@ -318,26 +318,48 @@
       (assign-task state (twp-task-id pair) (twp-worker-id pair)))))
 
 ;; updater
-;; TODO
+;; TODO 焼きなまし
 
 (defstruct (init-updater (:conc-name iu-))
   (unknown-factor nil :type fixnum))
 
-(defstruct (no-means-updater (:conc-name su-))
-  "何もしない")
+(defstruct (no-means-updater (:conc-name nmu-)
+                             (:constructor make-no-means-updater (unknown-factor)))
+  "何もしない"
+  (iu (make-init-updater :unknown-factor unknown-factor) :type init-updater)
+  (init nil :type boolean))
 
 (defmethod update-worker-factors ((iu init-updater) components input pairs)
   (with-accessors ((state state)) components
     (dolist (pair pairs)
-      )))
+      (update-worker-factors-by-id state
+                                   (twp-worker-id pair)
+                                   (coerce
+                                    (loop repeat (factor-amount input)
+                                          collect (iu-unknown-factor iu))
+                                    '(simple-array fixnum (*)))))))
 
-(defmethod update-worker-factors ((_ no-means-updater) components input pairs))
+(defmethod update-worker-factors ((nmu no-means-updater) components input pairs)
+  (unless (nmu-init nmu)
+    ;; delegate
+    (update-worker-factors (nmu-iu nmu) components input pairs)
+    (setf (nmu-init nmu) t)))
 
 ;; main
 
+(defconstant +unknown-factor+ 100)
+
+(defun make-components ()
+  (make-instance 'components
+                 :state (make-state)
+                 :watm (make-greedy-matcher)
+                 :wfu (make-no-means-updater +unknown-factor+)
+                 :dth (make-done-tasks-handler)
+                 :ah (make-assign-handler)))
+
 (defun main ()
   (let ((input (read-input))
-        (components (make-instance 'components)))
+        (components (make-components)))
     (game-loop components input)))
 
 #-swank (main)
