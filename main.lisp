@@ -237,9 +237,9 @@
                            done-task-ids)))))
 
 (defun main ()
-  (let ((n (parse-fixnum
-            (read-line-fast))))
-    (println n)))
+  (let ((input (read-input))
+        (components (make-instance 'components)))
+    (handler components input)))
 
 #-swank (main)
 
