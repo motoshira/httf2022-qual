@@ -183,22 +183,58 @@
                 :task-factors ds
                 :relations-by-task-id es)))
 
+(defun read-done-task-ids ()
+  (let ((cnt (read)))
+    (when (>= cnt 0)
+      (loop repeat cnt
+            collect (1- (read-fixnum))))))
+
+;; VO
+
+(defstruct (task-worker-pair (:conc-name twp-))
+  (task-id nil :type fixnum)
+  (worker-id nil :type fixnum))
+
 (defstruct (state (:conc-name st-)))
 
+(defgeneric match-worker-and-task (matcher components input))
+(defgeneric update-worker-factors (updater components input pairs))
+(defgeneric handle-done-tasks (handler components input done-task-ids))
+(defgeneric handle-assign (handler components input pairs))
+
 (defclass components ()
-  ((state :type state)
-   (match-worker-and-task :type function
-                          :reader metch-worker-and-task
-                          :initarg :mwat)
-   (update-worker-factors :type function
-                          :reader update-worker-factors
-                          :initarg :uwf)
-   (treat-done-tasks :type function
-                     :reader treat-done-tasks
-                     :initarg :tdt)
-   (treat-assign :type function
-                 :reader treat-assign
-                 :initarg :ta)))
+  ((state :reader state
+          :initarg :state)
+   (worker-and-task-matcher :reader worker-and-task-matcher
+                            :initarg :watm)
+   (worker-factors-updater :reader worker-factors-updater
+                           :initarg :wfu)
+   (done-tasks-handler :reader done-tasks-handler
+                       :initarg :dth)
+   (assign-handler :reader assign-handler
+                   :initarg :ah)))
+
+(defun handler (components input)
+  (loop
+    (let ((pairs (match-worker-and-task (worker-and-task-matcher components)
+                                        components
+                                        input)))
+      (format t
+              "~a ~{~a~^ ~}~&"
+              (length pairs)
+              (mapcar #'twp-task-id pairs))
+      (handle-assign (assign-handler components)
+                     components
+                     input
+                     pairs)
+      (let ((done-task-ids (read-done-task-ids)))
+        ;; 終了
+        (unless done-task-ids
+          (return))
+        (handle-done-tasks (done-tasks-handler components)
+                           components
+                           input
+                           done-task-ids)))))
 
 (defun main ()
   (let ((n (parse-fixnum
