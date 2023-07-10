@@ -6,7 +6,7 @@
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   #+swank (declaim (optimize (speed 3) (safety 2)))
-  #-swank (declaim (optimize (speed 3) (safety 0) (debug 0)))
+  ;; #-swank (declaim (optimize (speed 3) (safety 0) (debug 0)))
   #-swank (declaim (sb-ext:muffle-conditions sb-ext:compiler-note))
   #-swank (sb-ext:disable-debugger))
 
@@ -183,7 +183,7 @@
                 :task-factors ds
                 :relations-by-task-id es)))
 
-(defun read-done-task-ids ()
+(defun read-done-worker-ids ()
   (let ((cnt (read)))
     (when (>= cnt 0)
       (loop repeat cnt
@@ -210,10 +210,11 @@
 (defstruct task
   (id nil :type fixnum)
   (assigned-member-id nil :type (or null fixnum))
+  (done nil :type boolean)
   (factors nil :type (simple-array fixnum (*))))
 
 (defgeneric find-task-by-id (state task-id))
-(defgeneric find-undone-tasks (state)
+(defgeneric find-undone-and-unassigned-tasks (state)
   (:documentation "誰かがassignされているタスクは含まない"))
 
 ;; service
@@ -228,7 +229,7 @@
 
 (defgeneric match-worker-and-task (matcher components input))
 (defgeneric update-worker-factors (updater components input pairs))
-(defgeneric handle-done-tasks (handler components input done-task-ids))
+(defgeneric handle-done-tasks (handler components input done-worker-ids))
 (defgeneric handle-assign (handler components input pairs))
 
 (defclass components ()
@@ -252,15 +253,19 @@
     (loop
       (let ((pairs (match-worker-and-task watm components input)))
         (format t
-                "~a ~{~a~^ ~}~&"
+                "~a ~{~a~^ ~}~%"
                 (length pairs)
-                (mapcar #'twp-task-id pairs))
+                (loop for pair in pairs
+                      append (list (1+ (twp-worker-id pair))
+                                   (1+ (twp-task-id pair)))))
+        (format *error-output* "pairs:~a~&" pairs)
         (handle-assign ah components input pairs)
-        (let ((done-task-ids (read-done-task-ids)))
+        (let ((done-worker-ids (read-done-worker-ids)))
           ;; 終了
-          (unless done-task-ids
+          (unless done-worker-ids
             (return))
-          (handle-done-tasks dth components input done-task-ids)
+          (format *error-output* "done-worker-ids:~a~&" done-worker-ids)
+          (handle-done-tasks dth components input done-worker-ids)
           (update-worker-factors wfu components input pairs))))))
 
 ;;
@@ -283,31 +288,37 @@
   (with-accessors ((state state)) components
     (let ((res nil)
           (workers (find-unassigned-workers state))
-          (tasks (find-undone-tasks state))
+          (tasks (find-undone-and-unassigned-tasks state))
           (assigned-task-ids (make-hash-table)))
       (dolist (worker workers)
         (let ((min-cost #.(expt 10 10))
               (task-id -1))
           (dolist (task tasks)
-            (unless (gethash (task-id task) assigned-task-ids)
-              (let ((est-cost (%estimated-cost worker task)))
-                (when (< est-cost min-cost)
-                  (setf min-cost est-cost
-                        task-id (task-id task))))))
+            (let ((dependent-task-ids (dependent-task-ids-by-task-id input (task-id task))))
+              (when (and (not (gethash (task-id task) assigned-task-ids))
+                         (loop for t-id in dependent-task-ids
+                               for tt = (find-task-by-id state t-id)
+                               always (task-done tt)))
+                (let ((est-cost (%estimated-cost worker task)))
+                  (when (< est-cost min-cost)
+                    (setf min-cost est-cost
+                          task-id (task-id task)))))))
           (when (>= task-id 0)
             (push (make-task-worker-pair :task-id task-id
                                          :worker-id (worker-id worker))
-                  res))))
+                  res)
+            (setf (gethash task-id assigned-task-ids) t))))
       (nreverse res))))
 
 ;; handler
 
 (defstruct (done-tasks-handler (:conc-name dth-)))
 
-(defmethod handle-done-tasks ((_ done-tasks-handler) components input done-task-ids)
+(defmethod handle-done-tasks ((_ done-tasks-handler) components input done-worker-ids)
   (with-accessors ((state state)) components
-    (dolist (task-id done-task-ids)
-      (make-task-done state task-id))))
+    (dolist (worker-id done-worker-ids)
+      (let ((task-id (worker-assigned-task-id (find-worker-by-id state worker-id))))
+        (make-task-done state task-id)))))
 
 (defstruct (assign-handler (:conc-name ah-)))
 
@@ -370,7 +381,7 @@
   (aref (st-workers state) worker-id))
 
 (defmethod update-worker-factors-by-id ((state state) worker-id factors)
-  (let ((worker (find-worker-by-id state worker-id)))
+  (symbol-macrolet ((worker (find-worker-by-id state worker-id)))
     (setf (worker-factors worker) factors)))
 
 (defmethod find-unassigned-workers ((state state))
@@ -381,21 +392,24 @@
 (defmethod find-task-by-id ((state state) task-id)
   (aref (st-tasks state) task-id))
 
-(defmethod find-undone-tasks ((state state))
+(defmethod find-undone-and-unassigned-tasks ((state state))
   (coerce
-   (remove-if #'task-assigned-member-id (st-tasks state))
+   (remove-if #f(or (task-assigned-member-id %)
+                    (task-done %))
+              (st-tasks state))
    'list))
 
 (defmethod make-task-done ((state state) task-id)
-  (let* ((task (find-task-by-id state task-id))
-         (worker-id (task-assigned-member-id task))
-         (worker (find-worker-by-id state worker-id)))
-    (setf (task-assigned-member-id task) nil
-          (worker-assigned-task-id worker) nil)))
+  (let ((worker-id (task-assigned-member-id (find-task-by-id state task-id))))
+    (symbol-macrolet ((task (aref (st-tasks state) task-id))
+                      (worker (aref (st-workers state) worker-id)))
+      (setf (task-assigned-member-id task) nil
+            (task-done task) t
+            (worker-assigned-task-id worker) nil))))
 
 (defmethod assign-task ((state state) task-id worker-id)
-  (let* ((task (find-task-by-id state task-id))
-         (worker (find-worker-by-id state worker-id)))
+  (symbol-macrolet ((task (find-task-by-id state task-id))
+                    (worker (find-worker-by-id state worker-id)))
     (setf (task-assigned-member-id task) worker-id
           (worker-assigned-task-id worker) task-id)))
 
