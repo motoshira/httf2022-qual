@@ -195,7 +195,7 @@
   (task-id nil :type fixnum)
   (worker-id nil :type fixnum))
 
-;; entity
+;; entity repository
 
 (defstruct worker
   (id nil :type fixnum)
@@ -205,6 +205,7 @@
 (defgeneric find-worker-by-id (state worker-id))
 (defgeneric update-worker-factors-by-id (state worker-id factors)
   (:documentation "factorsは(simple-array fixnum (*))"))
+(defgeneric find-unassigned-workers (state))
 
 (defstruct task
   (id nil :type fixnum)
@@ -212,17 +213,16 @@
   (factors nil :type (simple-array fixnum (*))))
 
 (defgeneric find-task-by-id (state task-id))
+(defgeneric find-undone-tasks (state)
+  (:documentation "誰かがassignされているタスクは含まない"))
 
 ;; service
 
-(defgeneric find-unassigned-workers (state))
-(defgeneric find-undone-tasks (state)
-  (:documentation "誰かがassignされているタスクは含まない"))
 (defgeneric make-task-done (state task-id)
   (:documentation "workerも解放する"))
 (defgeneric assign-task (state task-id worker-id)
   (:documentation "いずれもfreeであることを期待する"))
-(defgeneric find-assigned-task-worker-pairs (state))
+;; (defgeneric find-assigned-task-worker-pairs (state))
 
 ;; usecase
 
@@ -244,6 +244,7 @@
                    :initarg :ah)))
 
 (defun game-loop (components input)
+  ;; TODO validation
   (with-accessors ((watm worker-and-task-matcher)
                    (ah assign-handler)
                    (dth done-tasks-handler)
@@ -272,15 +273,13 @@
 (defstruct (greedy-matcher (:conc-name gm-)))
 
 (defun %estimated-cost (worker task)
-  (let ((cost 0))
-    (declare (fixnum cost))
-    (dotimes (i (factor-amount task))
-      (incf cost (max 0 (the fixnum
-                             (- (aref (task-factors task) i)
-                                (aref (worker-factors worker) i))))))
-    cost))
+  (loop for task-factor across (task-factors task)
+        for worker-factor across (worker-factors worker)
+        sum (max 0 (the fixnum
+                        (- task-factor worker-factor)))))
 
 (defmethod match-worker-and-task ((_ greedy-matcher) components input)
+  ;; TODO consider dependencies
   (with-accessors ((state state)) components
     (let ((res nil)
           (workers (find-unassigned-workers state))
@@ -345,21 +344,79 @@
     (update-worker-factors (nmu-iu nmu) components input pairs)
     (setf (nmu-init nmu) t)))
 
+;; state impl
+
+(defstruct (state (:conc-name st-)
+                  (:constructor %make-state))
+  (workers nil :type (simple-array worker (*)))
+  (tasks nil :type (simple-array task (*))))
+
+(defun make-state (input)
+  (let ((k (factor-amount input)))
+    (%make-state :workers (coerce (loop for i below (in-member-amount input)
+                                        collect (make-worker :id i
+                                                             :factors (make-array k :element-type 'fixnum)))
+                                  '(simple-array worker (*)))
+                 :tasks (coerce (loop for i below (task-amount input)
+                                      for factors = (coerce
+                                                     (loop for j below k
+                                                           collect (aref (in-task-factors input) i j))
+                                                     '(simple-array fixnum (*)))
+                                      collect (make-task :id i
+                                                         :factors factors))
+                                '(simple-array task (*))))))
+
+(defmethod find-worker-by-id ((state state) worker-id)
+  (aref (st-workers state) worker-id))
+
+(defmethod update-worker-factors-by-id ((state state) worker-id factors)
+  (let ((worker (find-worker-by-id state worker-id)))
+    (setf (worker-factors worker) factors)))
+
+(defmethod find-unassigned-workers ((state state))
+  (coerce
+   (remove-if #'worker-assigned-task-id (st-workers state))
+   'list))
+
+(defmethod find-task-by-id ((state state) task-id)
+  (aref (st-tasks state) task-id))
+
+(defmethod find-undone-tasks ((state state))
+  (coerce
+   (remove-if #'task-assigned-member-id (st-tasks state))
+   'list))
+
+(defmethod make-task-done ((state state) task-id)
+  (let* ((task (find-task-by-id state task-id))
+         (worker-id (task-assigned-member-id task))
+         (worker (find-worker-by-id state worker-id)))
+    (setf (task-assigned-member-id task) nil
+          (worker-assigned-task-id worker) nil)))
+
+(defmethod assign-task ((state state) task-id worker-id)
+  (let* ((task (find-task-by-id state task-id))
+         (worker (find-worker-by-id state worker-id)))
+    (setf (task-assigned-member-id task) worker-id
+          (worker-assigned-task-id worker) task-id)))
+
+;; (defmethod find-assigned-task-worker-pairs ((state state))
+;;   ())
+
 ;; main
 
 (defconstant +unknown-factor+ 100)
 
-(defun make-components ()
+(defun make-components (input)
   (make-instance 'components
-                 :state (make-state)
+                 :state (make-state input)
                  :watm (make-greedy-matcher)
                  :wfu (make-no-means-updater +unknown-factor+)
                  :dth (make-done-tasks-handler)
                  :ah (make-assign-handler)))
 
 (defun main ()
-  (let ((input (read-input))
-        (components (make-components)))
+  (let* ((input (read-input))
+         (components (make-components input)))
     (game-loop components input)))
 
 #-swank (main)
