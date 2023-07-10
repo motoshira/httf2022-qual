@@ -195,7 +195,36 @@
   (task-id nil :type fixnum)
   (worker-id nil :type fixnum))
 
-(defstruct (state (:conc-name st-)))
+;; entity
+
+(defstruct worker
+  (id nil :type fixnum)
+  (assigned-task-id nil :type (or null fixnum))
+  (factors nil :type (simple-array fixnum (*))))
+
+(defgeneric find-worker-by-id (state worker-id))
+(defgeneric update-worker-factors (state worker-id factors)
+  (:documentation "factorsは(simple-array fixnum (*))"))
+
+(defstruct task
+  (id nil :type fixnum)
+  (assigned-member-id nil :type (or null fixnum))
+  (factors nil :type (simple-array fixnum (*))))
+
+(defgeneric find-task-by-id (state task-id))
+
+;; service
+
+(defgeneric find-unassigned-workers (state))
+(defgeneric find-undone-tasks (state)
+  (:documentation "誰かがassignされているタスクは含まない"))
+(defgeneric make-task-done (state task-id)
+  (:documentation "workerも解放する"))
+(defgeneric assign-task (state task-id worker-id)
+  (:documentation "いずれもfreeであることを期待する"))
+(defgeneric find-assigned-task-worker-pairs (state))
+
+;; usecase
 
 (defgeneric match-worker-and-task (matcher components input))
 (defgeneric update-worker-factors (updater components input pairs))
@@ -214,32 +243,102 @@
    (assign-handler :reader assign-handler
                    :initarg :ah)))
 
-(defun handler (components input)
-  (loop
-    (let ((pairs (match-worker-and-task (worker-and-task-matcher components)
-                                        components
-                                        input)))
-      (format t
-              "~a ~{~a~^ ~}~&"
-              (length pairs)
-              (mapcar #'twp-task-id pairs))
-      (handle-assign (assign-handler components)
-                     components
-                     input
-                     pairs)
-      (let ((done-task-ids (read-done-task-ids)))
-        ;; 終了
-        (unless done-task-ids
-          (return))
-        (handle-done-tasks (done-tasks-handler components)
-                           components
-                           input
-                           done-task-ids)))))
+(defun game-loop (components input)
+  (with-accessors ((watm worker-and-task-matcher)
+                   (ah assign-handler)
+                   (dth done-tasks-handler)
+                   (wfu worker-factors-updater)) components
+    (loop
+      (let ((pairs (match-worker-and-task watm components input)))
+        (format t
+                "~a ~{~a~^ ~}~&"
+                (length pairs)
+                (mapcar #'twp-task-id pairs))
+        (handle-assign ah components input pairs)
+        (let ((done-task-ids (read-done-task-ids)))
+          ;; 終了
+          (unless done-task-ids
+            (return))
+          (handle-done-tasks dth components input done-task-ids)
+          (update-worker-factors wfu components input pairs))))))
+
+;;
+;; impl
+;;
+
+;; matcher
+;; TODO minCostFlow
+
+(defstruct (greedy-matcher (:conc-name gm-)))
+
+(defun %estimated-cost (worker task)
+  (let ((cost 0))
+    (declare (fixnum cost))
+    (dotimes (i (factor-amount task))
+      (incf cost (max 0 (the fixnum
+                             (- (aref (task-factors task) i)
+                                (aref (worker-factors worker) i))))))
+    cost))
+
+(defmethod match-worker-and-task ((_ greedy-matcher) components input)
+  (with-accessors ((state state)) components
+    (let ((res nil)
+          (workers (find-unassigned-workers state))
+          (tasks (find-undone-tasks state))
+          (assigned-task-ids (make-hash-table)))
+      (dolist (worker workers)
+        (let ((min-cost #.(expt 10 10))
+              (task-id -1))
+          (dolist (task tasks)
+            (unless (gethash (task-id task) assigned-task-ids)
+              (let ((est-cost (%estimated-cost worker task)))
+                (when (< est-cost min-cost)
+                  (setf min-cost est-cost
+                        task-id (task-id task))))))
+          (when (>= task-id 0)
+            (push (make-task-worker-pair :task-id task-id
+                                         :worker-id (worker-id worker))
+                  res))))
+      (nreverse res))))
+
+;; handler
+
+(defstruct (done-tasks-handler (:conc-name dth-)))
+
+(defmethod handle-done-tasks ((_ done-tasks-handler) components input done-task-ids)
+  (with-accessors ((state state)) components
+    (dolist (task-id done-task-ids)
+      (make-task-done state task-id))))
+
+(defstruct (assign-handler (:conc-name ah-)))
+
+(defmethod handle-assign ((_ assign-handler) components input pairs)
+  (with-accessors ((state state)) components
+    (dolist (pair pairs)
+      (assign-task state (twp-task-id pair) (twp-worker-id pair)))))
+
+;; updater
+;; TODO
+
+(defstruct (init-updater (:conc-name iu-))
+  (unknown-factor nil :type fixnum))
+
+(defstruct (no-means-updater (:conc-name su-))
+  "何もしない")
+
+(defmethod update-worker-factors ((iu init-updater) components input pairs)
+  (with-accessors ((state state)) components
+    (dolist (pair pairs)
+      )))
+
+(defmethod update-worker-factors ((_ no-means-updater) components input pairs))
+
+;; main
 
 (defun main ()
   (let ((input (read-input))
         (components (make-instance 'components)))
-    (handler components input)))
+    (game-loop components input)))
 
 #-swank (main)
 
