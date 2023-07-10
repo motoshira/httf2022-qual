@@ -246,6 +246,7 @@
 
 (defun game-loop (components input)
   ;; TODO validation
+  ;; FIXME illegal output format on day ~
   (with-accessors ((watm worker-and-task-matcher)
                    (ah assign-handler)
                    (dth done-tasks-handler)
