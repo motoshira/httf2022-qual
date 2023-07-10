@@ -161,6 +161,9 @@
 (defun factor-amount (input)
   (array-dimension (in-task-factors input) 1))
 
+(defun dependent-task-ids-by-task-id (input task-id)
+  (aref (in-relations-by-task-id input) task-id))
+
 (defun read-input ()
   (let* ((n (read))
          (m (read))
@@ -180,8 +183,22 @@
                 :task-factors ds
                 :relations-by-task-id es)))
 
+(defstruct (state (:conc-name st-)))
+
 (defclass components ()
-  (()))
+  ((state :type state)
+   (match-worker-and-task :type function
+                          :reader metch-worker-and-task
+                          :initarg :mwat)
+   (update-worker-factors :type function
+                          :reader update-worker-factors
+                          :initarg :uwf)
+   (treat-done-tasks :type function
+                     :reader treat-done-tasks
+                     :initarg :tdt)
+   (treat-assign :type function
+                 :reader treat-assign
+                 :initarg :ta)))
 
 (defun main ()
   (let ((n (parse-fixnum
