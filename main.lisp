@@ -284,17 +284,11 @@
   ;; list of functions
   (evaluators nil :type list))
 
-#+nil
-(defun %estimated-cost (worker task)
-  (loop for task-factor across (task-factors task)
-        for worker-factor across (worker-factors worker)
-        sum (max 0 (the fixnum
-                        (- task-factor worker-factor)))))
-
-(defun %estimated-cost (gm worker task)
+(defun %estimated-cost (gm state worker task)
+  ;; 小さいほど良い
   (the fixnum
        (loop for fn in (gm-evaluators gm)
-             sum (the fixnum (funcall fn worker task)))))
+             sum (the fixnum (funcall fn state worker task)))))
 
 (defmethod match-worker-and-task ((gm greedy-matcher) components input)
   ;; TODO selectableかどうかの判定を別のところに切り出す
@@ -435,17 +429,46 @@
     (setf (task-assigned-member-id task) worker-id
           (worker-assigned-task-id worker) task-id)))
 
-;; (defmethod find-assigned-task-worker-pairs ((state state))
-;;   ())
-
 ;; main
 
 (defconstant +unknown-factor+ 100)
+(defconstant +worker-factors+ 10)
+(defconstant +unselectable-penalty+ +inf+)
+
+(defun eval-factors (state worker task)
+  (declare (ignore state))
+  (let ((worker-factors (worker-factors worker))
+        (task-factors (task-factors task)))
+    (* (loop for i below (length worker-factors)
+             sum (max 0  (- (aref task-factors i)
+                            (aref worker-factors i))))
+       +worker-factors+)))
+
+(defun eval-dependencies (state worker task)
+  "依存しているタスクが多いタスクほど早く終わらせたい"
+  ;; TODO 依存しているタスク数を持つ必要がある
+  )
+
+(defun eval-selectable-or-not (state worker task)
+  "選択できないタスクには∞のペナルティ"
+  (if (or
+       ;; 完了済みである
+       (task-done task)
+       ;; 選択されている
+       (worker-assigned-task-id worker)
+       ;; 依存されている未完了タスクがある
+       (loop for id in (task-dependent-task-ids task)
+             for tt = (find-task-by-id state id)
+               thereis (not (task-done tt))))
+      +inf+
+      0))
 
 (defun make-components (input)
   (make-instance 'components
                  :state (make-state input)
-                 :watm (make-greedy-matcher)
+                 :watm (make-greedy-matcher :evaluators (list #'eval-factors
+                                                              #'eval-dependencies
+                                                              #'eval-selectable-or-not))
                  :wfu (make-no-means-updater +unknown-factor+)
                  :dth (make-done-tasks-handler)
                  :ah (make-assign-handler)))
