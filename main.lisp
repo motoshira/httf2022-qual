@@ -150,6 +150,8 @@
 
 (in-package #:cl-user)
 
+(defconstant +inf+ #.(expt 10 18))
+
 (defstruct (input (:conc-name in-))
   (member-amount nil :type fixnum)
   (task-factors nil :type (simple-array fixnum (* *)))
@@ -186,8 +188,9 @@
 (defun read-done-worker-ids ()
   (let ((cnt (read)))
     (when (>= cnt 0)
-      (loop repeat cnt
-            collect (1- (read-fixnum))))))
+      (values (loop repeat cnt
+                    collect (1- (read-fixnum)))
+              t))))
 
 ;; VO
 
@@ -208,9 +211,10 @@
 (defgeneric find-unassigned-workers (state))
 
 (defstruct task
-  (id nil :type fixnum)
+  (id nil :type fixnum :read-only t)
   (assigned-member-id nil :type (or null fixnum))
   (done nil :type boolean)
+  (dependent-task-ids nil :type list :read-only t)
   (factors nil :type (simple-array fixnum (*))))
 
 (defgeneric find-task-by-id (state task-id))
@@ -246,12 +250,11 @@
 
 (defun game-loop (components input)
   ;; TODO validation
-  ;; FIXME illegal output format on day ~
   (with-accessors ((watm worker-and-task-matcher)
                    (ah assign-handler)
                    (dth done-tasks-handler)
                    (wfu worker-factors-updater)) components
-    (loop
+    (loop for day from 1 do
       (let ((pairs (match-worker-and-task watm components input)))
         (format t
                 "~a ~{~a~^ ~}~%"
@@ -259,13 +262,14 @@
                 (loop for pair in pairs
                       append (list (1+ (twp-worker-id pair))
                                    (1+ (twp-task-id pair)))))
-        (format *error-output* "pairs:~a~&" pairs)
+        (finish-output)
         (handle-assign ah components input pairs)
-        (let ((done-worker-ids (read-done-worker-ids)))
+        (multiple-value-bind (done-worker-ids more) (read-done-worker-ids)
           ;; 終了
-          (unless done-worker-ids
+          (unless more
+            (println "end" *error-output*)
             (return))
-          (format *error-output* "done-worker-ids:~a~&" done-worker-ids)
+          (format *error-output* "day~a done-worker-ids:~a~&" day done-worker-ids)
           (handle-done-tasks dth components input done-worker-ids)
           (update-worker-factors wfu components input pairs))))))
 
@@ -276,40 +280,44 @@
 ;; matcher
 ;; TODO minCostFlow
 
-(defstruct (greedy-matcher (:conc-name gm-)))
+(defstruct (greedy-matcher (:conc-name gm-))
+  ;; list of functions
+  (evaluators nil :type list))
 
-(defun %estimated-cost (worker task)
-  (loop for task-factor across (task-factors task)
-        for worker-factor across (worker-factors worker)
-        sum (max 0 (the fixnum
-                        (- task-factor worker-factor)))))
+(defun %estimated-cost (gm state worker task)
+  ;; 小さいほど良い
+  (the fixnum
+       (loop for fn in (gm-evaluators gm)
+             sum (the fixnum (funcall fn state worker task)))))
 
-(defmethod match-worker-and-task ((_ greedy-matcher) components input)
-  ;; TODO consider dependencies
+(defmethod match-worker-and-task ((gm greedy-matcher) components input)
+  ;; TODO selectableかどうかの判定を別のところに切り出す
+  ;; TODO 評価でやってしまったほうがシンプルでいい気もする
   (with-accessors ((state state)) components
-    (let ((res nil)
-          (workers (find-unassigned-workers state))
-          (tasks (find-undone-and-unassigned-tasks state))
-          (assigned-task-ids (make-hash-table)))
-      (dolist (worker workers)
-        (let ((min-cost #.(expt 10 10))
-              (task-id -1))
-          (dolist (task tasks)
-            (let ((dependent-task-ids (dependent-task-ids-by-task-id input (task-id task))))
-              (when (and (not (gethash (task-id task) assigned-task-ids))
-                         (loop for t-id in dependent-task-ids
-                               for tt = (find-task-by-id state t-id)
-                               always (task-done tt)))
-                (let ((est-cost (%estimated-cost worker task)))
-                  (when (< est-cost min-cost)
-                    (setf min-cost est-cost
-                          task-id (task-id task)))))))
-          (when (>= task-id 0)
-            (push (make-task-worker-pair :task-id task-id
-                                         :worker-id (worker-id worker))
-                  res)
-            (setf (gethash task-id assigned-task-ids) t))))
-      (nreverse res))))
+    (with-accessors ((evaluator gm-evaluator)) gm
+      (let ((res nil)
+            (workers (find-unassigned-workers state))
+            (tasks (find-undone-and-unassigned-tasks state))
+            (assigned-task-ids (make-hash-table)))
+        (dolist (worker workers)
+          (let ((min-cost +inf+)
+                (task-id -1))
+            (dolist (task tasks)
+              (let ((dependent-task-ids (task-dependent-task-ids task)))
+                (when (and (not (gethash (task-id task) assigned-task-ids))
+                           (loop for t-id in dependent-task-ids
+                                 for tt = (find-task-by-id state t-id)
+                                 always (task-done tt)))
+                  (let ((est-cost (%estimated-cost gm worker task)))
+                    (when (< est-cost min-cost)
+                      (setf min-cost est-cost
+                            task-id (task-id task)))))))
+            (when (>= task-id 0)
+              (push (make-task-worker-pair :task-id task-id
+                                           :worker-id (worker-id worker))
+                    res)
+              (setf (gethash task-id assigned-task-ids) t))))
+        (nreverse res)))))
 
 ;; handler
 
@@ -317,13 +325,17 @@
 
 (defmethod handle-done-tasks ((_ done-tasks-handler) components input done-worker-ids)
   (with-accessors ((state state)) components
-    (dolist (worker-id done-worker-ids)
-      (let ((task-id (worker-assigned-task-id (find-worker-by-id state worker-id))))
+    (let ((task-ids (loop for worker-id in done-worker-ids
+                          for worker = (find-worker-by-id state worker-id)
+                          collect (worker-assigned-task-id worker))))
+      (format *error-output* "handle-done-task done-worker-ids:~a task-ids:~a~&" done-worker-ids task-ids)
+      (dolist (task-id task-ids)
         (make-task-done state task-id)))))
 
 (defstruct (assign-handler (:conc-name ah-)))
 
 (defmethod handle-assign ((_ assign-handler) components input pairs)
+  (format *error-output* "handle-assign pairs:~a~&" pairs)
   (with-accessors ((state state)) components
     (dolist (pair pairs)
       (assign-task state (twp-task-id pair) (twp-worker-id pair)))))
@@ -339,6 +351,8 @@
   "何もしない"
   (iu (make-init-updater :unknown-factor unknown-factor) :type init-updater)
   (init nil :type boolean))
+
+;; TODOcompined updater
 
 (defmethod update-worker-factors ((iu init-updater) components input pairs)
   (with-accessors ((state state)) components
@@ -375,7 +389,8 @@
                                                            collect (aref (in-task-factors input) i j))
                                                      '(simple-array fixnum (*)))
                                       collect (make-task :id i
-                                                         :factors factors))
+                                                         :factors factors
+                                                         :dependent-task-ids (dependent-task-ids-by-task-id input i)))
                                 '(simple-array task (*))))))
 
 (defmethod find-worker-by-id ((state state) worker-id)
@@ -414,17 +429,46 @@
     (setf (task-assigned-member-id task) worker-id
           (worker-assigned-task-id worker) task-id)))
 
-;; (defmethod find-assigned-task-worker-pairs ((state state))
-;;   ())
-
 ;; main
 
 (defconstant +unknown-factor+ 100)
+(defconstant +worker-factors+ 10)
+(defconstant +unselectable-penalty+ +inf+)
+
+(defun eval-factors (state worker task)
+  (declare (ignore state))
+  (let ((worker-factors (worker-factors worker))
+        (task-factors (task-factors task)))
+    (* (loop for i below (length worker-factors)
+             sum (max 0  (- (aref task-factors i)
+                            (aref worker-factors i))))
+       +worker-factors+)))
+
+(defun eval-dependencies (state worker task)
+  "依存しているタスクが多いタスクほど早く終わらせたい"
+  ;; TODO 依存しているタスク数を持つ必要がある
+  )
+
+(defun eval-selectable-or-not (state worker task)
+  "選択できないタスクには∞のペナルティ"
+  (if (or
+       ;; 完了済みである
+       (task-done task)
+       ;; 選択されている
+       (worker-assigned-task-id worker)
+       ;; 依存されている未完了タスクがある
+       (loop for id in (task-dependent-task-ids task)
+             for tt = (find-task-by-id state id)
+               thereis (not (task-done tt))))
+      +inf+
+      0))
 
 (defun make-components (input)
   (make-instance 'components
                  :state (make-state input)
-                 :watm (make-greedy-matcher)
+                 :watm (make-greedy-matcher :evaluators (list #'eval-factors
+                                                              #'eval-dependencies
+                                                              #'eval-selectable-or-not))
                  :wfu (make-no-means-updater +unknown-factor+)
                  :dth (make-done-tasks-handler)
                  :ah (make-assign-handler)))
