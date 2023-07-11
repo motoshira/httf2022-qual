@@ -286,7 +286,7 @@
                         (- task-factor worker-factor)))))
 
 (defmethod match-worker-and-task ((_ greedy-matcher) components input)
-  ;; TODO consider dependencies
+  ;; TODO selectableかどうかの判定を別のところに切り出す
   (with-accessors ((state state)) components
     (let ((res nil)
           (workers (find-unassigned-workers state))
