@@ -350,6 +350,8 @@
   (iu (make-init-updater :unknown-factor unknown-factor) :type init-updater)
   (init nil :type boolean))
 
+;; TODOcompined updater
+
 (defmethod update-worker-factors ((iu init-updater) components input pairs)
   (with-accessors ((state state)) components
     (dolist (pair pairs)
