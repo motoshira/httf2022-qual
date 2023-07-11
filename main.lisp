@@ -209,9 +209,10 @@
 (defgeneric find-unassigned-workers (state))
 
 (defstruct task
-  (id nil :type fixnum)
+  (id nil :type fixnum :read-only t)
   (assigned-member-id nil :type (or null fixnum))
   (done nil :type boolean)
+  (dependent-task-ids nil :type list :read-only t)
   (factors nil :type (simple-array fixnum (*))))
 
 (defgeneric find-task-by-id (state task-id))
@@ -277,7 +278,9 @@
 ;; matcher
 ;; TODO minCostFlow
 
-(defstruct (greedy-matcher (:conc-name gm-)))
+(defstruct (greedy-matcher (:conc-name gm-))
+  evaluator
+  selectable-task?)
 
 (defun %estimated-cost (worker task)
   (loop for task-factor across (task-factors task)
@@ -285,32 +288,34 @@
         sum (max 0 (the fixnum
                         (- task-factor worker-factor)))))
 
-(defmethod match-worker-and-task ((_ greedy-matcher) components input)
+(defmethod match-worker-and-task ((gm greedy-matcher) components input)
   ;; TODO selectableかどうかの判定を別のところに切り出す
+  ;; TODO dependenciesを考慮する 評価でやる or 除外しておく？
   (with-accessors ((state state)) components
-    (let ((res nil)
-          (workers (find-unassigned-workers state))
-          (tasks (find-undone-and-unassigned-tasks state))
-          (assigned-task-ids (make-hash-table)))
-      (dolist (worker workers)
-        (let ((min-cost #.(expt 10 10))
-              (task-id -1))
-          (dolist (task tasks)
-            (let ((dependent-task-ids (dependent-task-ids-by-task-id input (task-id task))))
-              (when (and (not (gethash (task-id task) assigned-task-ids))
-                         (loop for t-id in dependent-task-ids
-                               for tt = (find-task-by-id state t-id)
-                               always (task-done tt)))
-                (let ((est-cost (%estimated-cost worker task)))
-                  (when (< est-cost min-cost)
-                    (setf min-cost est-cost
-                          task-id (task-id task)))))))
-          (when (>= task-id 0)
-            (push (make-task-worker-pair :task-id task-id
-                                         :worker-id (worker-id worker))
-                  res)
-            (setf (gethash task-id assigned-task-ids) t))))
-      (nreverse res))))
+    (with-accessors ((evaluator gm-evaluator)) gm
+      (let ((res nil)
+            (workers (find-unassigned-workers state))
+            (tasks (find-undone-and-unassigned-tasks state))
+            (assigned-task-ids (make-hash-table)))
+        (dolist (worker workers)
+          (let ((min-cost #.(expt 10 10))
+                (task-id -1))
+            (dolist (task tasks)
+              (let ((dependent-task-ids (task-dependent-task-ids task)))
+                (when (and (not (gethash (task-id task) assigned-task-ids))
+                           (loop for t-id in dependent-task-ids
+                                 for tt = (find-task-by-id state t-id)
+                                 always (task-done tt)))
+                  (let ((est-cost (%estimated-cost worker task)))
+                    (when (< est-cost min-cost)
+                      (setf min-cost est-cost
+                            task-id (task-id task)))))))
+            (when (>= task-id 0)
+              (push (make-task-worker-pair :task-id task-id
+                                           :worker-id (worker-id worker))
+                    res)
+              (setf (gethash task-id assigned-task-ids) t))))
+        (nreverse res)))))
 
 ;; handler
 
@@ -380,7 +385,8 @@
                                                            collect (aref (in-task-factors input) i j))
                                                      '(simple-array fixnum (*)))
                                       collect (make-task :id i
-                                                         :factors factors))
+                                                         :factors factors
+                                                         :dependent-task-ids (dependent-task-ids-by-task-id input i)))
                                 '(simple-array task (*))))))
 
 (defmethod find-worker-by-id ((state state) worker-id)
