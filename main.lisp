@@ -186,8 +186,9 @@
 (defun read-done-worker-ids ()
   (let ((cnt (read)))
     (when (>= cnt 0)
-      (loop repeat cnt
-            collect (1- (read-fixnum))))))
+      (values (loop repeat cnt
+                    collect (1- (read-fixnum)))
+              t))))
 
 ;; VO
 
@@ -251,7 +252,7 @@
                    (ah assign-handler)
                    (dth done-tasks-handler)
                    (wfu worker-factors-updater)) components
-    (loop
+    (loop for day from 1 do
       (let ((pairs (match-worker-and-task watm components input)))
         (format t
                 "~a ~{~a~^ ~}~%"
@@ -259,13 +260,14 @@
                 (loop for pair in pairs
                       append (list (1+ (twp-worker-id pair))
                                    (1+ (twp-task-id pair)))))
-        (format *error-output* "pairs:~a~&" pairs)
+        (finish-output)
         (handle-assign ah components input pairs)
-        (let ((done-worker-ids (read-done-worker-ids)))
+        (multiple-value-bind (done-worker-ids more) (read-done-worker-ids)
           ;; 終了
-          (unless done-worker-ids
+          (unless more
+            (println "end" *error-output*)
             (return))
-          (format *error-output* "done-worker-ids:~a~&" done-worker-ids)
+          (format *error-output* "day~a done-worker-ids:~a~&" day done-worker-ids)
           (handle-done-tasks dth components input done-worker-ids)
           (update-worker-factors wfu components input pairs))))))
 
@@ -317,13 +319,17 @@
 
 (defmethod handle-done-tasks ((_ done-tasks-handler) components input done-worker-ids)
   (with-accessors ((state state)) components
-    (dolist (worker-id done-worker-ids)
-      (let ((task-id (worker-assigned-task-id (find-worker-by-id state worker-id))))
+    (let ((task-ids (loop for worker-id in done-worker-ids
+                          for worker = (find-worker-by-id state worker-id)
+                          collect (worker-assigned-task-id worker))))
+      (format *error-output* "handle-done-task done-worker-ids:~a task-ids:~a~&" done-worker-ids task-ids)
+      (dolist (task-id task-ids)
         (make-task-done state task-id)))))
 
 (defstruct (assign-handler (:conc-name ah-)))
 
 (defmethod handle-assign ((_ assign-handler) components input pairs)
+  (format *error-output* "handle-assign pairs:~a~&" pairs)
   (with-accessors ((state state)) components
     (dolist (pair pairs)
       (assign-task state (twp-task-id pair) (twp-worker-id pair)))))
