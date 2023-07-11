@@ -150,6 +150,8 @@
 
 (in-package #:cl-user)
 
+(defconstant +inf+ #.(expt 10 18))
+
 (defstruct (input (:conc-name in-))
   (member-amount nil :type fixnum)
   (task-factors nil :type (simple-array fixnum (* *)))
@@ -279,18 +281,24 @@
 ;; TODO minCostFlow
 
 (defstruct (greedy-matcher (:conc-name gm-))
-  evaluator
-  selectable-task?)
+  ;; list of functions
+  (evaluators nil :type list))
 
+#+nil
 (defun %estimated-cost (worker task)
   (loop for task-factor across (task-factors task)
         for worker-factor across (worker-factors worker)
         sum (max 0 (the fixnum
                         (- task-factor worker-factor)))))
 
+(defun %estimated-cost (gm worker task)
+  (the fixnum
+       (loop for fn in (gm-evaluators gm)
+             sum (the fixnum (funcall fn worker task)))))
+
 (defmethod match-worker-and-task ((gm greedy-matcher) components input)
   ;; TODO selectableかどうかの判定を別のところに切り出す
-  ;; TODO dependenciesを考慮する 評価でやる or 除外しておく？
+  ;; TODO 評価でやってしまったほうがシンプルでいい気もする
   (with-accessors ((state state)) components
     (with-accessors ((evaluator gm-evaluator)) gm
       (let ((res nil)
@@ -298,7 +306,7 @@
             (tasks (find-undone-and-unassigned-tasks state))
             (assigned-task-ids (make-hash-table)))
         (dolist (worker workers)
-          (let ((min-cost #.(expt 10 10))
+          (let ((min-cost +inf+)
                 (task-id -1))
             (dolist (task tasks)
               (let ((dependent-task-ids (task-dependent-task-ids task)))
@@ -306,7 +314,7 @@
                            (loop for t-id in dependent-task-ids
                                  for tt = (find-task-by-id state t-id)
                                  always (task-done tt)))
-                  (let ((est-cost (%estimated-cost worker task)))
+                  (let ((est-cost (%estimated-cost gm worker task)))
                     (when (< est-cost min-cost)
                       (setf min-cost est-cost
                             task-id (task-id task)))))))
